@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Secrets -- never commit
+.env
+
+# IDE / OS
+.idea/
+.DS_Store
+
+# Docker Desktop build exports (unrelated to the project)
+*.dockerbuild
