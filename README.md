@@ -65,9 +65,15 @@ do not need a real `OPENAI_API_KEY`.
 
 ## Known limitations
 
-- The agent performs at most one round of tool calls; it cannot chain tools yet.
-- An exception inside a tool fails the whole request (covered by an `xfail` test).
-- No limits yet on the number of agent steps, timeouts or token usage.
+- The agent loop is bounded: at most `AGENT_MAX_STEPS` model calls with tools and
+  `AGENT_MAX_TOOL_CALLS` tool executions per request (configurable, see
+  `.env.example`); after that the model must answer with what it has.
+- Tool failures (unknown tool, invalid arguments, exceptions) are reported back to
+  the model as error messages instead of failing the request.
+- OpenAI errors (timeout, outage, rate limit) return `502` with a generic message.
+- `AGENT_TIMEOUT_SECONDS` is an overall time budget checked between model calls; a
+  call already in flight is bounded only by `OPENAI_TIMEOUT_SECONDS` (x retries).
+- No token budget yet; no conversation history.
 
 ## Deploying to Cloud Run (optional)
 
@@ -82,12 +88,13 @@ The `Dockerfile` is Cloud Run compatible (listens on `$PORT`, default 8080):
 ## Roadmap
 
 1. Done: **AI API and the first agent** -- tool calling without a framework.
-2. **A robust agent loop** -- multiple tool rounds, step and time limits,
-   tool error handling.
-3. **Model Context Protocol** -- expose the tools as an MCP server so that
+2. Done: **A robust agent loop** -- multiple tool rounds, step and tool-call
+   limits, tool error handling.
+3. **Web search tool** (Tavily) -- answers that need up-to-date information.
+4. **Model Context Protocol** -- expose the tools as an MCP server so that
    other clients can use them too.
-4. **Workflow automation with n8n** -- call this service as an HTTP step.
-5. **Agent frameworks** -- LangChain/LangGraph, OpenAI Agents SDK, compared on
+5. **Workflow automation with n8n** -- call this service as an HTTP step.
+6. **Agent frameworks** -- LangChain/LangGraph, OpenAI Agents SDK, compared on
    the same use case.
-6. **Integration with `ai-demo`** -- a private, authenticated call from the
+7. **Integration with `ai-demo`** -- a private, authenticated call from the
    Java service that keeps its rate limiting and quotas in place.
