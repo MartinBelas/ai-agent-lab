@@ -2,10 +2,12 @@
 
 import time
 
+import httpx
+
 from app import agent
 from app.config import get_settings
 from app.prompts import STEP_LIMIT_PROMPT
-from tests.conftest import text_response, tool_call_response
+from tests.conftest import tavily_results, text_response, tool_call_response
 
 
 def test_tool_schemas_match_handlers():
@@ -228,3 +230,79 @@ def test_tool_call_limit_stops_executing_tools(fake_openai, monkeypatch):
         "tool_call_id": "call_2",
         "content": "Error: tool call limit for this request reached.",
     }
+
+
+# --- web_search in the agent loop ---------------------------------------
+
+def offered_tool_names(create_call) -> set[str]:
+    return {schema["function"]["name"] for schema in create_call.kwargs["tools"]}
+
+
+def test_web_search_is_offered_when_key_is_configured(fake_openai):
+    fake_openai.chat.completions.create.side_effect = [text_response("Hi")]
+
+    agent.run_agent("Hi")
+
+    first_call = fake_openai.chat.completions.create.call_args_list[0]
+    assert "web_search" in offered_tool_names(first_call)
+
+
+def test_web_search_is_not_offered_without_key(fake_openai, monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "")
+    get_settings.cache_clear()
+    fake_openai.chat.completions.create.side_effect = [
+        tool_call_response("web_search", arguments='{"query": "news"}'),
+        text_response("I can't search the web."),
+    ]
+
+    agent.run_agent("What's new today?")
+
+    calls = fake_openai.chat.completions.create.call_args_list
+    assert offered_tool_names(calls[0]) == {"get_current_time"}
+    # Even if the model asks for it anyway, the tool is not run.
+    assert calls[1].kwargs["messages"][-1]["content"] == "Unknown tool: web_search"
+
+
+def test_web_search_has_its_own_per_request_limit(fake_openai, monkeypatch):
+    searches = []
+    monkeypatch.setitem(agent.TOOL_HANDLERS, "web_search", lambda query: searches.append(query) or "results")
+    monkeypatch.setitem(agent.TOOL_HANDLERS, "get_current_time", lambda: "12:00")
+    monkeypatch.setenv("WEB_SEARCH_MAX_CALLS", "2")
+    get_settings.cache_clear()
+    fake_openai.chat.completions.create.side_effect = [
+        tool_call_response("web_search", arguments='{"query": "a"}', call_id="call_1"),
+        tool_call_response("web_search", arguments='{"query": "b"}', call_id="call_2"),
+        tool_call_response("web_search", arguments='{"query": "c"}', call_id="call_3"),
+        tool_call_response("get_current_time", call_id="call_4"),
+        text_response("Done."),
+    ]
+
+    reply = agent.run_agent("Search a lot")
+
+    assert reply == "Done."
+    assert searches == ["a", "b"]
+    # The mock keeps a reference to the same (growing) messages list for every call,
+    # so look the tool results up by their call id in the final conversation.
+    final_messages = fake_openai.chat.completions.create.call_args_list[-1].kwargs["messages"]
+    tool_results = {m["tool_call_id"]: m["content"] for m in final_messages if m["role"] == "tool"}
+    assert tool_results["call_1"] == "results"
+    assert "at most 2 times per request" in tool_results["call_3"]
+    # Other tools are not affected by the web_search limit.
+    assert tool_results["call_4"] == "12:00"
+
+
+def test_web_search_results_go_back_to_the_model(fake_openai, fake_tavily):
+    fake_tavily(lambda request: httpx.Response(200, json=tavily_results(
+        {"title": "Release notes", "url": "https://example.com/notes", "content": "Version 2.0 is out."}
+    )))
+    fake_openai.chat.completions.create.side_effect = [
+        tool_call_response("web_search", arguments='{"query": "latest version"}', call_id="call_1"),
+        text_response("Version 2.0 (https://example.com/notes)."),
+    ]
+
+    reply = agent.run_agent("What is the latest version?")
+
+    assert reply == "Version 2.0 (https://example.com/notes)."
+    tool_message = fake_openai.chat.completions.create.call_args_list[-1].kwargs["messages"][-1]
+    assert tool_message["tool_call_id"] == "call_1"
+    assert "URL: https://example.com/notes" in tool_message["content"]

@@ -24,6 +24,13 @@ def use_agent():
     app.dependency_overrides.clear()
 
 
+def test_root_redirects_to_api_docs():
+    response = client.get("/", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/docs"
+
+
 def test_health_returns_up():
     response = client.get("/api/health")
 

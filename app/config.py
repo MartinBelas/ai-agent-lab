@@ -9,7 +9,7 @@ pydantic-settings reads the values in this order (first one wins):
 
 from functools import lru_cache
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +30,23 @@ class Settings(BaseSettings):
     # Overall time budget for one request. Checked between model calls, so the real
     # worst case is this value plus one OpenAI call (timeout x retries).
     agent_timeout_seconds: float = Field(default=60.0, gt=0)
+
+    # Web search through Tavily (see app/web_search.py). Optional: without a key the
+    # web_search tool is simply not offered to the model, so the app runs without it.
+    tavily_api_key: SecretStr | None = None
+    # Web search costs real money, so it has its own per-request limit, much lower
+    # than agent_max_tool_calls.
+    web_search_max_calls: int = Field(default=2, ge=1)
+    web_search_max_results: int = Field(default=3, ge=1, le=10)
+    web_search_timeout_seconds: float = Field(default=10.0, gt=0)
+
+    @field_validator("tavily_api_key", mode="before")
+    @classmethod
+    def empty_key_means_no_key(cls, value: object) -> object:
+        """'TAVILY_API_KEY=' (empty) in .env means "not configured", not an empty key."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 @lru_cache

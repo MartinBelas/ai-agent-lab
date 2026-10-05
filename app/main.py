@@ -16,11 +16,15 @@ from collections.abc import Callable
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from openai import OpenAIError
 from pydantic import BaseModel, Field
 
 from app.agent import run_agent
+
+# Uvicorn configures only its own loggers. Without this, INFO logs from our modules
+# (app.*) and from httpx (the outgoing requests to OpenAI and Tavily) would not show up.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s - %(message)s")
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +64,12 @@ def handle_openai_error(request: Request, error: OpenAIError) -> JSONResponse:
     """
     logger.error("OpenAI call failed: %s: %s", type(error).__name__, error)
     return JSONResponse(status_code=502, content={"detail": "The AI provider is currently unavailable."})
+
+
+@app.get("/", include_in_schema=False)
+def root() -> RedirectResponse:
+    """The service has no web page of its own, so send browsers to the API docs."""
+    return RedirectResponse(url="/docs")
 
 
 @app.get("/api/health")

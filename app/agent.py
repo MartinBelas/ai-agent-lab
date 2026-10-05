@@ -12,16 +12,21 @@ The loop is bounded (agent_max_steps, agent_max_tool_calls and agent_timeout_sec
 in app/config.py), so a confused model can never spin forever or burn an unbounded
 number of paid tool calls.
 
-Once this works, it's a natural foundation for:
-- more tools (e.g. web search, calling an internal API)
-- an MCP server (exposing the tools to another client, not just this agent)
+Tools:
+- get_current_time -- a trivial sample tool
+- web_search -- searches the web via Tavily (app/web_search.py); offered only when
+  TAVILY_API_KEY is configured, and limited to web_search_max_calls per request
+
+Next step: an MCP server (exposing the tools to another client, not just this agent).
 """
 
 import inspect
 import json
 import logging
 import time
+from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 from openai import OpenAI
@@ -37,8 +42,9 @@ from openai.types.chat import (
 )
 from openai.types.chat.chat_completion_message_function_tool_call_param import Function as FunctionCallParam
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.prompts import STEP_LIMIT_PROMPT, SYSTEM_PROMPT
+from app.web_search import web_search
 
 logger = logging.getLogger(__name__)
 
@@ -81,14 +87,88 @@ TOOL_SCHEMAS: list[ChatCompletionToolParam] = [
                 "required": [],
             },
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Searches the web and returns the top results with title, URL and a short excerpt. "
+                "Use it only when the answer needs current or recent information (news, prices, "
+                "exchange rates, recent releases, events after your training data) or a specific "
+                "fact you are not sure about. Do not use it for general knowledge, math or small talk."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "A short, specific search query, e.g. 'EUR to CZK exchange rate today'.",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 # Translates the tool name returned by the model to the Python function.
 # Also, an allowlist: only functions listed here can ever be executed.
 TOOL_HANDLERS: dict[str, Callable[..., str]] = {
     "get_current_time": get_current_time,
+    "web_search": web_search,
 }
+
+
+def get_tool_schemas(settings: Settings) -> list[ChatCompletionToolParam]:
+    """
+    The tools offered to the model in this request. A tool that is not configured
+    (web_search without an API key) is left out, so the model never even tries it.
+    """
+    return [
+        schema
+        for schema in TOOL_SCHEMAS
+        if schema["function"]["name"] != "web_search" or settings.tavily_api_key is not None
+    ]
+
+
+# --- Tool budget -----------------------------------------------------
+
+@dataclass
+class ToolBudget:
+    """
+    Counts tool executions within one request and says when a limit is reached.
+    There is an overall limit for all tools and optional stricter per-tool limits
+    for tools that cost money (web_search).
+    """
+
+    max_total: int
+    max_per_tool: dict[str, int]
+    used_total: int = 0
+    used_per_tool: Counter[str] = field(default_factory=Counter)
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "ToolBudget":
+        return cls(
+            max_total=settings.agent_max_tool_calls,
+            max_per_tool={"web_search": settings.web_search_max_calls},
+        )
+
+    def refusal(self, tool_name: str) -> str | None:
+        """None if the tool may run now, otherwise the error message for the model."""
+        if self.used_total >= self.max_total:
+            return "Error: tool call limit for this request reached."
+        tool_limit = self.max_per_tool.get(tool_name)
+        if tool_limit is not None and self.used_per_tool[tool_name] >= tool_limit:
+            return (
+                f"Error: tool '{tool_name}' can be used at most {tool_limit} times per request. "
+                "Answer with the information you already have."
+            )
+        return None
+
+    def record(self, tool_name: str) -> None:
+        self.used_total += 1
+        self.used_per_tool[tool_name] += 1
 
 
 # --- Tool execution ------------------------------------------------
@@ -161,7 +241,9 @@ def run_agent(user_message: str) -> str:
         ChatCompletionSystemMessageParam(role="system", content=SYSTEM_PROMPT),
         ChatCompletionUserMessageParam(role="user", content=user_message),
     ]
-    tool_calls_used = 0
+    tool_schemas = get_tool_schemas(settings)
+    offered_tool_names = {schema["function"]["name"] for schema in tool_schemas}
+    budget = ToolBudget.from_settings(settings)
     deadline = time.monotonic() + settings.agent_timeout_seconds
 
     for _ in range(settings.agent_max_steps):
@@ -174,7 +256,7 @@ def run_agent(user_message: str) -> str:
         response = openai_client.chat.completions.create(
             model=openai_model,
             messages=messages,
-            tools=TOOL_SCHEMAS,
+            tools=tool_schemas,
         )
         assistant_message = response.choices[0].message
 
@@ -184,11 +266,16 @@ def run_agent(user_message: str) -> str:
         # The model wants to call one or more tools -> run them and send the results back.
         messages.append(to_assistant_message_param(assistant_message))
         for tool_call in assistant_message.tool_calls:
-            if tool_calls_used >= settings.agent_max_tool_calls:
-                tool_result = "Error: tool call limit for this request reached."
+            tool_name = tool_call.function.name
+            refusal = budget.refusal(tool_name)
+            if tool_name not in offered_tool_names:
+                # Covers made-up names and tools that exist but are not configured.
+                tool_result = f"Unknown tool: {tool_name}"
+            elif refusal is not None:
+                tool_result = refusal
             else:
-                tool_calls_used += 1
-                tool_result = execute_tool(tool_call.function.name, tool_call.function.arguments)
+                budget.record(tool_name)
+                tool_result = execute_tool(tool_name, tool_call.function.arguments)
 
             # Every tool_call id must get a "tool" message, otherwise the API rejects the next call.
             messages.append(
