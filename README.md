@@ -10,8 +10,10 @@ automation, to agent frameworks.
 ## What it does today
 
 - `GET /api/health` -- liveness check, always returns `{"status": "UP"}`.
-- `POST /api/chat` -- sends the message to an OpenAI model that can call tools.
-  The message is validated (1-4000 characters). Tools:
+- `POST /api/chat` -- sends the message (optionally with earlier conversation
+  history) to an OpenAI model that can call tools, and returns the reply, the web
+  pages it searched (`sources`) and usage counters. See [API contract](#api-contract).
+  Tools:
   - `get_current_time` -- a trivial sample tool;
   - `web_search` -- searches the web through the [Tavily](https://tavily.com) API
     for questions that need up-to-date information. Enabled only when
@@ -26,6 +28,7 @@ app/
   main.py      # FastAPI endpoints (/api/health, /api/chat)
   agent.py     # Agent loop and tool definitions
   web_search.py  # web_search tool (Tavily Search API over httpx)
+  tool_result.py # ToolResult / Source -- what tools return to the agent loop
   prompts.py   # System prompts
   config.py    # Settings from env variables / .env (pydantic-settings)
 tests/         # pytest tests, OpenAI and Tavily are mocked
@@ -68,6 +71,58 @@ curl -X POST http://localhost:8081/api/chat \
      -d '{"message": "What is the EUR to CZK exchange rate today?"}'
 ```
 
+## API contract
+
+`POST /api/chat` (v1). The interactive schema is at `/docs`, the raw OpenAPI
+document at `/openapi.json`.
+
+Request:
+
+```json
+{
+  "message": "And how much is that in USD?",
+  "history": [
+    {"role": "user", "content": "What is the EUR to CZK exchange rate today?"},
+    {"role": "assistant", "content": "1 EUR is about 24.30 CZK."}
+  ]
+}
+```
+
+- `message` -- required, 1-4000 characters.
+- `history` -- optional, oldest first, default `[]`. Only `user` and `assistant`
+  roles are accepted, so a caller cannot inject a system prompt or tool results.
+  At most 20 messages, each 1-4000 characters, 16000 characters in total. The
+  service is stateless: the caller keeps the conversation and sends the recent
+  part of it with every request.
+
+Response:
+
+```json
+{
+  "reply": "1 EUR is about 24.30 CZK, which is roughly ...",
+  "sources": [
+    {"title": "EUR/CZK exchange rate", "url": "https://example.com/eur-czk"}
+  ],
+  "usage": {
+    "model_calls": 2,
+    "tool_calls": 1,
+    "web_searches": 1,
+    "input_tokens": 1830,
+    "output_tokens": 95
+  }
+}
+```
+
+- `sources` -- the web pages returned by `web_search` during this request,
+  filled by code from the search results (not written by the model), deduplicated
+  by URL, `http`/`https` only. Empty when no search ran. It lists what was
+  searched, which is not necessarily every page the reply relies on.
+- `usage` -- what the request consumed, summed over all OpenAI calls, for the
+  caller's quota accounting. Token counts are `0` if the provider does not report them.
+
+Errors: `422` invalid request (FastAPI validation details), `502` the AI provider
+failed (generic message, no internal details).
+
 ## Tests
 
 ```bash
@@ -95,7 +150,8 @@ They run in a temporary directory, so your local `.env` is never used.
 - OpenAI errors (timeout, outage, rate limit) return `502` with a generic message.
 - `AGENT_TIMEOUT_SECONDS` is an overall time budget checked between model calls; a
   call already in flight is bounded only by `OPENAI_TIMEOUT_SECONDS` (x retries).
-- No token budget yet; no conversation history.
+- No token budget yet (token usage is reported, not limited). Conversation history
+  is plain text only: tool results and sources from earlier turns are not replayed.
 
 ## Deploying to Cloud Run (optional)
 
@@ -114,10 +170,12 @@ The `Dockerfile` is Cloud Run compatible (listens on `$PORT`, default 8080):
 2. Done: **A robust agent loop** -- multiple tool rounds, step and tool-call
    limits, tool error handling.
 3. Done: **Web search tool** (Tavily) -- answers that need up-to-date information.
-4. **Model Context Protocol** -- expose the tools as an MCP server so that
+4. Done: **Chat API contract v1** -- conversation history, structured sources and
+   usage counters, ready for the `ai-demo` integration.
+5. **Model Context Protocol** -- expose the tools as an MCP server so that
    other clients can use them too.
-5. **Workflow automation with n8n** -- call this service as an HTTP step.
-6. **Agent frameworks** -- LangChain/LangGraph, OpenAI Agents SDK, compared on
+6. **Workflow automation with n8n** -- call this service as an HTTP step.
+7. **Agent frameworks** -- LangChain/LangGraph, OpenAI Agents SDK, compared on
    the same use case.
-7. **Integration with `ai-demo`** -- a private, authenticated call from the
+8. **Integration with `ai-demo`** -- a private, authenticated call from the
    Java service that keeps its rate limiting and quotas in place.

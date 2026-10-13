@@ -8,6 +8,10 @@ The agent loop:
 2. If the model answers with text, we are done.
 3. If it asks for tools, run them, append the results and go back to 1.
 
+Besides the reply, run_agent returns the sources found by web_search (filled by
+code from the search results, not by the model) and usage counters, so the
+caller (the Java AI-Demo app) can show links and account for the cost.
+
 The loop is bounded (agent_max_steps, agent_max_tool_calls and agent_timeout_seconds
 in app/config.py), so a confused model can never spin forever or burn an unbounded
 number of paid tool calls.
@@ -25,9 +29,10 @@ import json
 import logging
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import Any, Literal
 
 from openai import OpenAI
 from openai.types.chat import (
@@ -44,6 +49,7 @@ from openai.types.chat.chat_completion_message_function_tool_call_param import F
 
 from app.config import Settings, get_settings
 from app.prompts import STEP_LIMIT_PROMPT, SYSTEM_PROMPT
+from app.tool_result import Source, ToolResult
 from app.web_search import web_search
 
 logger = logging.getLogger(__name__)
@@ -114,7 +120,7 @@ TOOL_SCHEMAS: list[ChatCompletionToolParam] = [
 
 # Translates the tool name returned by the model to the Python function.
 # Also, an allowlist: only functions listed here can ever be executed.
-TOOL_HANDLERS: dict[str, Callable[..., str]] = {
+TOOL_HANDLERS: dict[str, Callable[..., str | ToolResult]] = {
     "get_current_time": get_current_time,
     "web_search": web_search,
 }
@@ -171,11 +177,39 @@ class ToolBudget:
         self.used_per_tool[tool_name] += 1
 
 
+# --- Input and output of one agent run ----------------------------------
+
+@dataclass(frozen=True)
+class HistoryMessage:
+    """One earlier message of the conversation, as sent by the caller."""
+
+    role: Literal["user", "assistant"]
+    content: str
+
+
+@dataclass(frozen=True)
+class AgentUsage:
+    """What one request consumed -- the caller uses it for quota accounting."""
+
+    model_calls: int = 0
+    tool_calls: int = 0
+    web_searches: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class AgentResult:
+    reply: str
+    sources: tuple[Source, ...] = ()
+    usage: AgentUsage = AgentUsage()
+
+
 # --- Tool execution ------------------------------------------------
 
-def execute_tool(tool_name: str, raw_arguments: str | None) -> str:
+def execute_tool(tool_name: str, raw_arguments: str | None) -> ToolResult:
     """
-    Runs one tool requested by the model and always returns a string.
+    Runs one tool requested by the model and always returns a ToolResult.
 
     Any failure (unknown tool, malformed arguments, exception inside the tool)
     is turned into an error message for the model instead of crashing the
@@ -184,14 +218,14 @@ def execute_tool(tool_name: str, raw_arguments: str | None) -> str:
     """
     tool_function = TOOL_HANDLERS.get(tool_name)
     if tool_function is None:
-        return f"Unknown tool: {tool_name}"
+        return ToolResult(content=f"Unknown tool: {tool_name}")
 
     try:
         tool_args = json.loads(raw_arguments or "{}")
     except json.JSONDecodeError:
-        return f"Error: arguments for tool '{tool_name}' are not valid JSON."
+        return ToolResult(content=f"Error: arguments for tool '{tool_name}' are not valid JSON.")
     if not isinstance(tool_args, dict):
-        return f"Error: arguments for tool '{tool_name}' must be a JSON object."
+        return ToolResult(content=f"Error: arguments for tool '{tool_name}' must be a JSON object.")
 
     # Check the arguments up front, so a TypeError raised *inside* the tool (a bug)
     # is not mistaken for "the model sent wrong arguments".
@@ -199,13 +233,14 @@ def execute_tool(tool_name: str, raw_arguments: str | None) -> str:
         inspect.signature(tool_function).bind(**tool_args)
     except TypeError:
         logger.warning("Tool %s called with invalid arguments: %s", tool_name, tool_args)
-        return f"Error: invalid arguments for tool '{tool_name}'."
+        return ToolResult(content=f"Error: invalid arguments for tool '{tool_name}'.")
 
     try:
-        return str(tool_function(**tool_args))
+        output = tool_function(**tool_args)
     except Exception as error:
         logger.exception("Tool %s failed", tool_name)
-        return f"Error: tool '{tool_name}' failed ({type(error).__name__})."
+        return ToolResult(content=f"Error: tool '{tool_name}' failed ({type(error).__name__}).")
+    return output if isinstance(output, ToolResult) else ToolResult(content=str(output))
 
 
 def to_assistant_message_param(message: ChatCompletionMessage) -> ChatCompletionAssistantMessageParam:
@@ -230,21 +265,73 @@ def to_assistant_message_param(message: ChatCompletionMessage) -> ChatCompletion
     )
 
 
+def to_conversation_messages(history: Sequence[HistoryMessage]) -> list[ChatCompletionMessageParam]:
+    """
+    Earlier messages from the caller. Only plain user/assistant text is accepted,
+    so a caller can never inject a system message or fake tool results.
+    """
+    messages: list[ChatCompletionMessageParam] = []
+    for message in history:
+        if message.role == "user":
+            messages.append(ChatCompletionUserMessageParam(role="user", content=message.content))
+        else:
+            messages.append(ChatCompletionAssistantMessageParam(role="assistant", content=message.content))
+    return messages
+
+
+@dataclass
+class UsageCounter:
+    """Mutable counterpart of AgentUsage, filled while the loop runs."""
+
+    model_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    def record(self, response: Any) -> None:
+        self.model_calls += 1
+        # usage can be missing (e.g. some proxies, or fake responses in tests).
+        usage = getattr(response, "usage", None)
+        self.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
+        self.output_tokens += getattr(usage, "completion_tokens", 0) or 0
+
+
+def add_sources(collected: dict[str, Source], new_sources: Sequence[Source]) -> None:
+    """Keeps the first occurrence of every URL, in the order they were found."""
+    for source in new_sources:
+        collected.setdefault(source.url, source)
+
+
 # --- Main agent loop -----------------------------------------------
 
-def run_agent(user_message: str) -> str:
+def run_agent(user_message: str, history: Sequence[HistoryMessage] = ()) -> AgentResult:
     settings = get_settings()
     openai_client = get_openai_client()
     openai_model = settings.openai_model
 
     messages: list[ChatCompletionMessageParam] = [
         ChatCompletionSystemMessageParam(role="system", content=SYSTEM_PROMPT),
+        *to_conversation_messages(history),
         ChatCompletionUserMessageParam(role="user", content=user_message),
     ]
     tool_schemas = get_tool_schemas(settings)
     offered_tool_names = {schema["function"]["name"] for schema in tool_schemas}
     budget = ToolBudget.from_settings(settings)
+    usage = UsageCounter()
+    sources: dict[str, Source] = {}
     deadline = time.monotonic() + settings.agent_timeout_seconds
+
+    def result(reply: str | None) -> AgentResult:
+        return AgentResult(
+            reply=reply or "",
+            sources=tuple(sources.values()),
+            usage=AgentUsage(
+                model_calls=usage.model_calls,
+                tool_calls=budget.used_total,
+                web_searches=budget.used_per_tool["web_search"],
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+            ),
+        )
 
     for _ in range(settings.agent_max_steps):
         # The deadline is checked between rounds; a model call already in flight
@@ -258,10 +345,11 @@ def run_agent(user_message: str) -> str:
             messages=messages,
             tools=tool_schemas,
         )
+        usage.record(response)
         assistant_message = response.choices[0].message
 
         if not assistant_message.tool_calls:
-            return assistant_message.content or ""
+            return result(assistant_message.content)
 
         # The model wants to call one or more tools -> run them and send the results back.
         messages.append(to_assistant_message_param(assistant_message))
@@ -270,20 +358,24 @@ def run_agent(user_message: str) -> str:
             refusal = budget.refusal(tool_name)
             if tool_name not in offered_tool_names:
                 # Covers made-up names and tools that exist but are not configured.
-                tool_result = f"Unknown tool: {tool_name}"
+                tool_result = ToolResult(content=f"Unknown tool: {tool_name}")
             elif refusal is not None:
-                tool_result = refusal
+                tool_result = ToolResult(content=refusal)
             else:
                 budget.record(tool_name)
                 tool_result = execute_tool(tool_name, tool_call.function.arguments)
+                add_sources(sources, tool_result.sources)
 
             # Every tool_call id must get a "tool" message, otherwise the API rejects the next call.
             messages.append(
-                ChatCompletionToolMessageParam(role="tool", tool_call_id=tool_call.id, content=tool_result)
+                ChatCompletionToolMessageParam(
+                    role="tool", tool_call_id=tool_call.id, content=tool_result.content
+                )
             )
 
     # Step or time limit reached: force a final text answer by not offering tools anymore.
     logger.warning("Agent stopped using tools (step limit %d or deadline)", settings.agent_max_steps)
     messages.append(ChatCompletionSystemMessageParam(role="system", content=STEP_LIMIT_PROMPT))
     final_response = openai_client.chat.completions.create(model=openai_model, messages=messages)
-    return final_response.choices[0].message.content or ""
+    usage.record(final_response)
+    return result(final_response.choices[0].message.content)

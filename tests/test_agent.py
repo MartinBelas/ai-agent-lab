@@ -1,12 +1,14 @@
 """Agent loop tests with a fake OpenAI client (see conftest.py)."""
 
 import time
+from types import SimpleNamespace
 
 import httpx
 
 from app import agent
 from app.config import get_settings
 from app.prompts import STEP_LIMIT_PROMPT
+from app.tool_result import Source, ToolResult
 from tests.conftest import tavily_results, text_response, tool_call_response
 
 
@@ -20,7 +22,7 @@ def test_tool_schemas_match_handlers():
 def test_answer_without_tool(fake_openai):
     fake_openai.chat.completions.create.side_effect = [text_response("Hello!")]
 
-    reply = agent.run_agent("Hi")
+    reply = agent.run_agent("Hi").reply
 
     assert reply == "Hello!"
     assert fake_openai.chat.completions.create.call_count == 1
@@ -36,7 +38,7 @@ def test_answer_with_tool(fake_openai, monkeypatch):
         text_response("It is 12:00 UTC."),
     ]
 
-    reply = agent.run_agent("What time is it?")
+    reply = agent.run_agent("What time is it?").reply
 
     assert reply == "It is 12:00 UTC."
     assert fake_openai.chat.completions.create.call_count == 2
@@ -56,7 +58,7 @@ def test_unknown_tool_is_reported_to_model(fake_openai):
         text_response("Sorry, I can't do that."),
     ]
 
-    reply = agent.run_agent("Delete everything")
+    reply = agent.run_agent("Delete everything").reply
 
     assert reply == "Sorry, I can't do that."
     tool_message = fake_openai.chat.completions.create.call_args_list[1].kwargs["messages"][-1]
@@ -73,7 +75,7 @@ def test_failing_tool_is_reported_to_model(fake_openai, monkeypatch):
         text_response("I couldn't get the time right now."),
     ]
 
-    reply = agent.run_agent("What time is it?")
+    reply = agent.run_agent("What time is it?").reply
 
     assert reply == "I couldn't get the time right now."
     tool_message = fake_openai.chat.completions.create.call_args_list[1].kwargs["messages"][-1]
@@ -137,7 +139,7 @@ def test_deadline_forces_final_answer_without_tools(fake_openai, monkeypatch):
         text_response("Out of time, here is what I have."),
     ]
 
-    reply = agent.run_agent("What time is it?")
+    reply = agent.run_agent("What time is it?").reply
 
     assert reply == "Out of time, here is what I have."
     calls = fake_openai.chat.completions.create.call_args_list
@@ -152,7 +154,7 @@ def test_invalid_json_arguments_are_reported_to_model(fake_openai):
         text_response("Something went wrong."),
     ]
 
-    reply = agent.run_agent("What time is it?")
+    reply = agent.run_agent("What time is it?").reply
 
     assert reply == "Something went wrong."
     tool_message = fake_openai.chat.completions.create.call_args_list[1].kwargs["messages"][-1]
@@ -165,7 +167,7 @@ def test_unexpected_arguments_are_reported_to_model(fake_openai):
         text_response("Here is the UTC time instead."),
     ]
 
-    reply = agent.run_agent("What time is it in Prague?")
+    reply = agent.run_agent("What time is it in Prague?").reply
 
     assert reply == "Here is the UTC time instead."
     tool_message = fake_openai.chat.completions.create.call_args_list[1].kwargs["messages"][-1]
@@ -180,7 +182,7 @@ def test_model_can_use_tools_in_several_rounds(fake_openai, monkeypatch):
         text_response("Still 12:00."),
     ]
 
-    reply = agent.run_agent("Check the time twice")
+    reply = agent.run_agent("Check the time twice").reply
 
     assert reply == "Still 12:00."
     calls = fake_openai.chat.completions.create.call_args_list
@@ -199,7 +201,7 @@ def test_step_limit_forces_final_answer_without_tools(fake_openai, monkeypatch):
         text_response("Final answer."),
     ]
 
-    reply = agent.run_agent("Loop forever")
+    reply = agent.run_agent("Loop forever").reply
 
     assert reply == "Final answer."
     calls = fake_openai.chat.completions.create.call_args_list
@@ -220,7 +222,7 @@ def test_tool_call_limit_stops_executing_tools(fake_openai, monkeypatch):
         text_response("Done."),
     ]
 
-    reply = agent.run_agent("Check the time twice")
+    reply = agent.run_agent("Check the time twice").reply
 
     assert reply == "Done."
     assert len(executions) == 1
@@ -277,7 +279,7 @@ def test_web_search_has_its_own_per_request_limit(fake_openai, monkeypatch):
         text_response("Done."),
     ]
 
-    reply = agent.run_agent("Search a lot")
+    reply = agent.run_agent("Search a lot").reply
 
     assert reply == "Done."
     assert searches == ["a", "b"]
@@ -300,9 +302,151 @@ def test_web_search_results_go_back_to_the_model(fake_openai, fake_tavily):
         text_response("Version 2.0 (https://example.com/notes)."),
     ]
 
-    reply = agent.run_agent("What is the latest version?")
+    reply = agent.run_agent("What is the latest version?").reply
 
     assert reply == "Version 2.0 (https://example.com/notes)."
     tool_message = fake_openai.chat.completions.create.call_args_list[-1].kwargs["messages"][-1]
     assert tool_message["tool_call_id"] == "call_1"
     assert "URL: https://example.com/notes" in tool_message["content"]
+
+
+# --- Conversation history ---------------------------------------------
+
+def test_history_is_sent_between_system_prompt_and_new_message(fake_openai):
+    fake_openai.chat.completions.create.side_effect = [text_response("About 28 USD.")]
+    history = [
+        agent.HistoryMessage(role="user", content="How much is 600 CZK in EUR?"),
+        agent.HistoryMessage(role="assistant", content="About 24.70 EUR."),
+    ]
+
+    agent.run_agent("And in USD?", history)
+
+    messages = fake_openai.chat.completions.create.call_args_list[0].kwargs["messages"]
+    assert messages[0]["role"] == "system"
+    assert messages[1:] == [
+        {"role": "user", "content": "How much is 600 CZK in EUR?"},
+        {"role": "assistant", "content": "About 24.70 EUR."},
+        {"role": "user", "content": "And in USD?"},
+    ]
+
+
+def test_without_history_only_system_prompt_and_message_are_sent(fake_openai):
+    fake_openai.chat.completions.create.side_effect = [text_response("Hi")]
+
+    agent.run_agent("Hi")
+
+    messages = fake_openai.chat.completions.create.call_args_list[0].kwargs["messages"]
+    assert [m["role"] for m in messages] == ["system", "user"]
+
+
+# --- Sources ------------------------------------------------------------
+
+def search_result(*sources: tuple[str, str]) -> ToolResult:
+    return ToolResult(content="results", sources=tuple(Source(title=t, url=u) for t, u in sources))
+
+
+def test_sources_from_all_searches_are_collected_without_duplicates(fake_openai, monkeypatch):
+    results = iter([
+        search_result(("A", "https://a.example"), ("B", "https://b.example")),
+        search_result(("B again", "https://b.example"), ("C", "https://c.example")),
+    ])
+    monkeypatch.setitem(agent.TOOL_HANDLERS, "web_search", lambda query: next(results))
+    fake_openai.chat.completions.create.side_effect = [
+        tool_call_response("web_search", arguments='{"query": "one"}', call_id="call_1"),
+        tool_call_response("web_search", arguments='{"query": "two"}', call_id="call_2"),
+        text_response("Answer."),
+    ]
+
+    result = agent.run_agent("Search twice")
+
+    assert result.sources == (
+        Source(title="A", url="https://a.example"),
+        Source(title="B", url="https://b.example"),  # first occurrence wins
+        Source(title="C", url="https://c.example"),
+    )
+
+
+def test_only_tool_content_goes_to_the_model(fake_openai, monkeypatch):
+    monkeypatch.setitem(
+        agent.TOOL_HANDLERS, "web_search", lambda query: search_result(("A", "https://a.example"))
+    )
+    fake_openai.chat.completions.create.side_effect = [
+        tool_call_response("web_search", arguments='{"query": "x"}', call_id="call_1"),
+        text_response("Answer."),
+    ]
+
+    agent.run_agent("Search")
+
+    tool_message = fake_openai.chat.completions.create.call_args_list[-1].kwargs["messages"][-1]
+    assert tool_message == {"role": "tool", "tool_call_id": "call_1", "content": "results"}
+
+
+def test_answer_without_search_has_no_sources(fake_openai):
+    fake_openai.chat.completions.create.side_effect = [text_response("4")]
+
+    assert agent.run_agent("2+2?").sources == ()
+
+
+def test_refused_search_adds_no_sources(fake_openai, monkeypatch):
+    monkeypatch.setitem(
+        agent.TOOL_HANDLERS, "web_search", lambda query: search_result(("A", "https://a.example"))
+    )
+    monkeypatch.setenv("WEB_SEARCH_MAX_CALLS", "1")
+    get_settings.cache_clear()
+    fake_openai.chat.completions.create.side_effect = [
+        tool_call_response("web_search", arguments='{"query": "x"}', call_id="call_1"),
+        tool_call_response("web_search", arguments='{"query": "y"}', call_id="call_2"),
+        text_response("Answer."),
+    ]
+
+    result = agent.run_agent("Search a lot")
+
+    assert result.sources == (Source(title="A", url="https://a.example"),)
+    assert result.usage.web_searches == 1
+
+
+# --- Usage ------------------------------------------------------------
+
+def with_tokens(response, prompt_tokens: int, completion_tokens: int):
+    response.usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+    return response
+
+
+def test_usage_counts_model_calls_tools_and_tokens(fake_openai, monkeypatch):
+    monkeypatch.setitem(agent.TOOL_HANDLERS, "get_current_time", lambda: "12:00")
+    monkeypatch.setitem(agent.TOOL_HANDLERS, "web_search", lambda query: "results")
+    fake_openai.chat.completions.create.side_effect = [
+        with_tokens(tool_call_response("web_search", arguments='{"query": "x"}', call_id="c1"), 100, 10),
+        with_tokens(tool_call_response("get_current_time", call_id="c2"), 300, 5),
+        with_tokens(text_response("Done."), 400, 50),
+    ]
+
+    usage = agent.run_agent("Do things").usage
+
+    assert usage == agent.AgentUsage(
+        model_calls=3, tool_calls=2, web_searches=1, input_tokens=800, output_tokens=65
+    )
+
+
+def test_usage_includes_the_forced_final_call(fake_openai, monkeypatch):
+    monkeypatch.setitem(agent.TOOL_HANDLERS, "get_current_time", lambda: "12:00")
+    monkeypatch.setenv("AGENT_MAX_STEPS", "1")
+    get_settings.cache_clear()
+    fake_openai.chat.completions.create.side_effect = [
+        with_tokens(tool_call_response("get_current_time"), 100, 10),
+        with_tokens(text_response("Final."), 200, 20),
+    ]
+
+    usage = agent.run_agent("Loop").usage
+
+    assert usage.model_calls == 2
+    assert (usage.input_tokens, usage.output_tokens) == (300, 30)
+
+
+def test_unknown_tool_is_not_counted_as_tool_call(fake_openai):
+    fake_openai.chat.completions.create.side_effect = [
+        tool_call_response("delete_all_files"),
+        text_response("No."),
+    ]
+
+    assert agent.run_agent("Delete everything").usage.tool_calls == 0

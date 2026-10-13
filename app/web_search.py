@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 from app.config import get_settings
+from app.tool_result import Source, ToolResult, make_source
 
 logger = logging.getLogger(__name__)
 
@@ -50,15 +51,18 @@ def get_http_client() -> httpx.Client:
     return httpx.Client(timeout=get_settings().web_search_timeout_seconds)
 
 
-def web_search(query: str) -> str:
-    """Searches the web and returns the top results formatted for the model."""
+def web_search(query: str) -> ToolResult:
+    """
+    Searches the web and returns the top results: formatted text for the model and
+    the result pages as sources for the API response.
+    """
     settings = get_settings()
     query = " ".join(query.split())  # collapse whitespace and newlines
     if not query:
-        return "Error: the search query must not be empty."
+        return ToolResult(content="Error: the search query must not be empty.")
     if settings.tavily_api_key is None:
         # The agent does not offer the tool without a key, so this is a safety net.
-        return "Error: web search is not configured."
+        return ToolResult(content="Error: web search is not configured.")
 
     try:
         response = get_http_client().post(
@@ -74,13 +78,15 @@ def web_search(query: str) -> str:
         )
     except httpx.TimeoutException:
         logger.warning("Tavily search timed out")
-        return "Error: web search timed out. Answer without live data and say so."
+        return ToolResult(content="Error: web search timed out. Answer without live data and say so.")
 
     if response.status_code in QUOTA_STATUS_CODES:
         logger.warning("Tavily usage limit reached (HTTP %d)", response.status_code)
-        return (
-            "Error: web search is temporarily unavailable (usage limit reached). "
-            "Answer without live data and say so."
+        return ToolResult(
+            content=(
+                "Error: web search is temporarily unavailable (usage limit reached). "
+                "Answer without live data and say so."
+            )
         )
     # Anything else that is not 2xx (bad key, bad request, Tavily outage) is our
     # problem, not the model's: raise, and execute_tool logs it and reports only
@@ -90,14 +96,18 @@ def web_search(query: str) -> str:
     return format_results(response.json())
 
 
-def format_results(payload: dict[str, Any]) -> str:
-    """Turns the Tavily JSON response into compact text the model can cite."""
+def format_results(payload: dict[str, Any]) -> ToolResult:
+    """
+    Turns the Tavily JSON response into compact text the model can read, plus the
+    list of result pages (only valid http(s) URLs) as sources.
+    """
     results = payload.get("results") or []
     logger.info("Tavily search returned %d results", len(results))
     if not results:
-        return "No results found."
+        return ToolResult(content="No results found.")
 
     parts = [RESULTS_HEADER]
+    sources: list[Source] = []
     for number, result in enumerate(results, start=1):
         title = result.get("title") or "(no title)"
         url = result.get("url") or "(no URL)"
@@ -111,4 +121,8 @@ def format_results(payload: dict[str, Any]) -> str:
         lines.append(content)
         parts.append("\n".join(lines))
 
-    return "\n\n".join(parts)
+        source = make_source(result.get("title"), result.get("url"))
+        if source is not None:
+            sources.append(source)
+
+    return ToolResult(content="\n\n".join(parts), sources=tuple(sources))

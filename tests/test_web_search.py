@@ -8,6 +8,7 @@ import pytest
 from app import web_search
 from app.agent import execute_tool
 from app.config import get_settings
+from app.tool_result import Source
 from tests.conftest import tavily_results
 
 RESULT = {
@@ -38,7 +39,7 @@ def test_sends_expected_request(fake_tavily):
 def test_formats_results_for_the_model(fake_tavily):
     fake_tavily(lambda request: httpx.Response(200, json=tavily_results(RESULT)))
 
-    output = web_search.web_search("EUR CZK rate")
+    output = web_search.web_search("EUR CZK rate").content
 
     assert output.startswith(web_search.RESULTS_HEADER)
     assert "[1] EUR/CZK exchange rate" in output
@@ -47,11 +48,51 @@ def test_formats_results_for_the_model(fake_tavily):
     assert "1 EUR = 24.30 CZK as of today." in output
 
 
+def test_results_are_returned_as_sources(fake_tavily):
+    second = {"title": "  ECB   reference rates ", "url": "https://example.org/ecb", "content": "..."}
+    fake_tavily(lambda request: httpx.Response(200, json=tavily_results(RESULT, second)))
+
+    sources = web_search.web_search("EUR CZK rate").sources
+
+    assert sources == (
+        Source(title="EUR/CZK exchange rate", url="https://example.com/eur-czk"),
+        Source(title="ECB reference rates", url="https://example.org/ecb"),  # whitespace collapsed
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["javascript:alert(1)", "data:text/html,<script>", "ftp://example.com/file", "/relative/path", "", None],
+)
+def test_results_without_http_url_are_not_sources(fake_tavily, url):
+    fake_tavily(lambda request: httpx.Response(200, json=tavily_results({**RESULT, "url": url})))
+
+    result = web_search.web_search("anything")
+
+    assert result.sources == ()
+    # The model still gets the text of the result.
+    assert "1 EUR = 24.30 CZK" in result.content
+
+
+def test_source_without_title_falls_back_to_url(fake_tavily):
+    fake_tavily(lambda request: httpx.Response(200, json=tavily_results({**RESULT, "title": None})))
+
+    assert web_search.web_search("anything").sources == (
+        Source(title="https://example.com/eur-czk", url="https://example.com/eur-czk"),
+    )
+
+
+def test_errors_have_no_sources(fake_tavily):
+    fake_tavily(lambda request: httpx.Response(429, json={}))
+
+    assert web_search.web_search("news today").sources == ()
+
+
 def test_long_excerpts_are_truncated(fake_tavily):
     long_result = {**RESULT, "content": "x" * 5000}
     fake_tavily(lambda request: httpx.Response(200, json=tavily_results(long_result)))
 
-    output = web_search.web_search("anything")
+    output = web_search.web_search("anything").content
 
     assert "x" * web_search.MAX_CONTENT_CHARS + "..." in output
     assert "x" * (web_search.MAX_CONTENT_CHARS + 1) not in output
@@ -60,13 +101,13 @@ def test_long_excerpts_are_truncated(fake_tavily):
 def test_no_results(fake_tavily):
     fake_tavily(lambda request: httpx.Response(200, json=tavily_results()))
 
-    assert web_search.web_search("asdfghjkl") == "No results found."
+    assert web_search.web_search("asdfghjkl").content == "No results found."
 
 
 def test_empty_query_is_rejected_without_calling_tavily(fake_tavily):
     sent = fake_tavily(lambda request: httpx.Response(200, json=tavily_results(RESULT)))
 
-    output = web_search.web_search("   ")
+    output = web_search.web_search("   ").content
 
     assert output == "Error: the search query must not be empty."
     assert sent == []
@@ -76,7 +117,7 @@ def test_empty_query_is_rejected_without_calling_tavily(fake_tavily):
 def test_quota_errors_tell_the_model_to_answer_without_live_data(fake_tavily, status_code):
     fake_tavily(lambda request: httpx.Response(status_code, json={"detail": {"error": "limit"}}))
 
-    output = web_search.web_search("news today")
+    output = web_search.web_search("news today").content
 
     assert "usage limit reached" in output
     assert "without live data" in output
@@ -88,13 +129,13 @@ def test_timeout_is_reported_to_the_model(fake_tavily):
 
     fake_tavily(time_out)
 
-    assert "timed out" in web_search.web_search("news today")
+    assert "timed out" in web_search.web_search("news today").content
 
 
 def test_unexpected_http_error_reaches_model_only_as_error_type(fake_tavily):
     fake_tavily(lambda request: httpx.Response(401, json={"detail": {"error": "Unauthorized: bad key"}}))
 
-    output = execute_tool("web_search", '{"query": "news today"}')
+    output = execute_tool("web_search", '{"query": "news today"}').content
 
     assert output == "Error: tool 'web_search' failed (HTTPStatusError)."
 
@@ -104,5 +145,5 @@ def test_missing_key_is_reported(fake_tavily, monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "")
     get_settings.cache_clear()
 
-    assert web_search.web_search("news today") == "Error: web search is not configured."
+    assert web_search.web_search("news today").content == "Error: web search is not configured."
     assert sent == []
