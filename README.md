@@ -1,8 +1,8 @@
 # AI Agent Lab
 
 A small Python microservice for experimenting with AI agents. It is a
-standalone "lab" next to the Java/Spring `ai-demo`
-application and does not depend on it.
+standalone "lab" next to the Java `ai-demo` application and runs without it;
+the optional `get_ai_demo_providers` tool reads `ai-demo`'s list of LLM providers.
 
 The learning path goes from raw tool calling, through MCP and workflow
 automation, to agent frameworks.
@@ -17,9 +17,12 @@ automation, to agent frameworks.
   - `get_current_time` -- a trivial sample tool;
   - `web_search` -- searches the web through the [Tavily](https://tavily.com) API
     for questions that need up-to-date information. Enabled only when
-    `TAVILY_API_KEY` is set.
+    `TAVILY_API_KEY` is set;
+  - `get_ai_demo_providers` -- asks the Java `ai-demo` app which LLM providers
+    and models it currently offers (`GET /api/llm/providers`). Enabled only when
+    `AI_DEMO_BASE_URL` is set.
 - Configuration via environment variables or a local `.env` file.
-- A pytest suite that never calls the real OpenAI or Tavily API.
+- A pytest suite that never calls the real OpenAI, Tavily or `ai-demo` API.
 
 ## Project structure
 
@@ -28,6 +31,7 @@ app/
   main.py      # FastAPI endpoints (/api/health, /api/chat)
   agent.py     # Agent loop and tool definitions
   web_search.py  # web_search tool (Tavily Search API over httpx)
+  ai_demo.py     # get_ai_demo_providers tool (read-only call to the Java ai-demo app)
   tool_result.py # ToolResult / Source -- what tools return to the agent loop
   prompts.py   # System prompts
   config.py    # Settings from env variables / .env (pydantic-settings)
@@ -129,8 +133,8 @@ failed (generic message, no internal details).
 pytest -v
 ```
 
-The tests replace the OpenAI client with a mock and the Tavily API with an
-`httpx.MockTransport`, so they are free, fast and do not need real API keys.
+The tests replace the OpenAI client with a mock, and the Tavily API and `ai-demo`
+with an `httpx.MockTransport`, so they are free, fast and do not need real API keys.
 They run in a temporary directory, so your local `.env` is never used.
 
 ## Known limitations
@@ -145,6 +149,9 @@ They run in a temporary directory, so your local `.env` is never used.
 - Search results are untrusted web content. They are labelled as data for the
   model, which reduces but does not remove the prompt-injection risk, so the tools
   stay read-only.
+- `get_ai_demo_providers` is the only call from this service to `ai-demo`: a
+  read-only GET of a public metadata endpoint, with no user data sent. Redirects
+  are not followed and the output is cut to 10 providers with short names.
 - Tool failures (unknown tool, invalid arguments, exceptions) are reported back to
   the model as error messages instead of failing the request.
 - OpenAI errors (timeout, outage, rate limit) return `502` with a generic message.
@@ -160,7 +167,7 @@ The `Dockerfile` is Cloud Run compatible (listens on `$PORT`, default 8080):
 1. Build and push the image (e.g. `docker build` and push to Artifact Registry
    or GHCR, or a GitHub Actions workflow).
 2. Provide `OPENAI_API_KEY` (and `TAVILY_API_KEY`) from Secret Manager as
-   environment variables.
+   environment variables, and set `AI_DEMO_BASE_URL` to the deployed `ai-demo` URL.
 3. Deploy it as a separate Cloud Run service (e.g. `ai-agent-lab`), ideally
    not publicly accessible.
 

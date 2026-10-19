@@ -260,7 +260,7 @@ def test_web_search_is_not_offered_without_key(fake_openai, monkeypatch):
     agent.run_agent("What's new today?")
 
     calls = fake_openai.chat.completions.create.call_args_list
-    assert offered_tool_names(calls[0]) == {"get_current_time"}
+    assert offered_tool_names(calls[0]) == {"get_current_time", "get_ai_demo_providers"}
     # Even if the model asks for it anyway, the tool is not run.
     assert calls[1].kwargs["messages"][-1]["content"] == "Unknown tool: web_search"
 
@@ -450,3 +450,47 @@ def test_unknown_tool_is_not_counted_as_tool_call(fake_openai):
     ]
 
     assert agent.run_agent("Delete everything").usage.tool_calls == 0
+
+
+# --- get_ai_demo_providers in the agent loop ------------------------------
+
+def test_ai_demo_providers_is_offered_when_url_is_configured(fake_openai):
+    fake_openai.chat.completions.create.side_effect = [text_response("Hi")]
+
+    agent.run_agent("Hi")
+
+    first_call = fake_openai.chat.completions.create.call_args_list[0]
+    assert "get_ai_demo_providers" in offered_tool_names(first_call)
+
+
+def test_ai_demo_providers_is_not_offered_without_url(fake_openai, monkeypatch):
+    monkeypatch.setenv("AI_DEMO_BASE_URL", "")
+    get_settings.cache_clear()
+    fake_openai.chat.completions.create.side_effect = [
+        tool_call_response("get_ai_demo_providers"),
+        text_response("I can't check that."),
+    ]
+
+    agent.run_agent("Which models does this demo support?")
+
+    calls = fake_openai.chat.completions.create.call_args_list
+    assert "get_ai_demo_providers" not in offered_tool_names(calls[0])
+    assert calls[1].kwargs["messages"][-1]["content"] == "Unknown tool: get_ai_demo_providers"
+
+
+def test_ai_demo_providers_result_goes_back_to_the_model(fake_openai, fake_ai_demo):
+    fake_ai_demo(lambda request: httpx.Response(200, json={"providers": [{"id": "OPENAI", "model": "gpt-x"}]}))
+    fake_openai.chat.completions.create.side_effect = [
+        tool_call_response("get_ai_demo_providers", call_id="call_1"),
+        text_response("This demo supports OpenAI (gpt-x)."),
+    ]
+
+    result = agent.run_agent("Which models does this demo support?")
+
+    assert result.reply == "This demo supports OpenAI (gpt-x)."
+    assert result.sources == ()  # not a web search
+    assert result.usage.tool_calls == 1
+    assert result.usage.web_searches == 0
+    tool_message = fake_openai.chat.completions.create.call_args_list[-1].kwargs["messages"][-1]
+    assert tool_message["tool_call_id"] == "call_1"
+    assert "- OPENAI (model: gpt-x)" in tool_message["content"]

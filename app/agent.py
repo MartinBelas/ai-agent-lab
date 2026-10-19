@@ -20,6 +20,8 @@ Tools:
 - get_current_time -- a trivial sample tool
 - web_search -- searches the web via Tavily (app/web_search.py); offered only when
   TAVILY_API_KEY is configured, and limited to web_search_max_calls per request
+- get_ai_demo_providers -- asks the Java AI-Demo app which LLM providers it offers
+  (app/ai_demo.py); offered only when AI_DEMO_BASE_URL is configured
 
 Next step: an MCP server (exposing the tools to another client, not just this agent).
 """
@@ -47,6 +49,7 @@ from openai.types.chat import (
 )
 from openai.types.chat.chat_completion_message_function_tool_call_param import Function as FunctionCallParam
 
+from app.ai_demo import get_ai_demo_providers
 from app.config import Settings, get_settings
 from app.prompts import STEP_LIMIT_PROMPT, SYSTEM_PROMPT
 from app.tool_result import Source, ToolResult
@@ -116,6 +119,22 @@ TOOL_SCHEMAS: list[ChatCompletionToolParam] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_ai_demo_providers",
+            "description": (
+                "Returns the LLM providers and models currently available in AI-Demo, the web "
+                "application this assistant is part of. Use it when the user asks which AI "
+                "models or providers this demo supports or can be switched to."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
 ]
 
 # Translates the tool name returned by the model to the Python function.
@@ -123,18 +142,26 @@ TOOL_SCHEMAS: list[ChatCompletionToolParam] = [
 TOOL_HANDLERS: dict[str, Callable[..., str | ToolResult]] = {
     "get_current_time": get_current_time,
     "web_search": web_search,
+    "get_ai_demo_providers": get_ai_demo_providers,
+}
+
+# Tools that need configuration; a tool not listed here is always available.
+TOOL_IS_CONFIGURED: dict[str, Callable[[Settings], bool]] = {
+    "web_search": lambda settings: settings.tavily_api_key is not None,
+    "get_ai_demo_providers": lambda settings: settings.ai_demo_base_url is not None,
 }
 
 
 def get_tool_schemas(settings: Settings) -> list[ChatCompletionToolParam]:
     """
     The tools offered to the model in this request. A tool that is not configured
-    (web_search without an API key) is left out, so the model never even tries it.
+    (web_search without an API key, get_ai_demo_providers without a URL) is left out,
+    so the model never even tries it.
     """
     return [
         schema
         for schema in TOOL_SCHEMAS
-        if schema["function"]["name"] != "web_search" or settings.tavily_api_key is not None
+        if TOOL_IS_CONFIGURED.get(schema["function"]["name"], lambda _: True)(settings)
     ]
 
 

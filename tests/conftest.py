@@ -2,8 +2,8 @@
 Shared test fixtures. pytest loads this file automatically.
 
 No test here ever calls a real paid API: the OpenAI client is replaced with a fake
-(MagicMock) whose responses we define per test, and the HTTP client used by
-web_search is replaced with an httpx.MockTransport. Tests are free, fast and
+(MagicMock) whose responses we define per test, and the HTTP clients used by
+web_search and get_ai_demo_providers are replaced with an httpx.MockTransport. Tests are free, fast and
 deterministic.
 """
 
@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from app import agent, web_search
+from app import agent, ai_demo, web_search
 from app.config import get_settings
 
 
@@ -27,6 +27,7 @@ def test_settings(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
     monkeypatch.setenv("OPENAI_MODEL", "test-model")
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test-key-not-real")
+    monkeypatch.setenv("AI_DEMO_BASE_URL", "https://ai-demo.test")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -34,12 +35,16 @@ def test_settings(monkeypatch, tmp_path):
 
 @pytest.fixture(autouse=True)
 def no_real_http(monkeypatch):
-    """Safety net: a test that reaches web_search without fake_tavily fails loudly."""
+    """Safety net: a test that makes an HTTP call without fake_tavily / fake_ai_demo fails loudly."""
 
     def refuse(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"Real HTTP call in a test: {request.method} {request.url}")
 
-    monkeypatch.setattr(web_search, "get_http_client", lambda: httpx.Client(transport=httpx.MockTransport(refuse)))
+    def refusing_client() -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(refuse))
+
+    monkeypatch.setattr(web_search, "get_http_client", refusing_client)
+    monkeypatch.setattr(ai_demo, "get_http_client", refusing_client)
 
 
 @pytest.fixture
@@ -50,12 +55,12 @@ def fake_openai(monkeypatch):
     return fake_client
 
 
-@pytest.fixture
-def fake_tavily(monkeypatch):
+def fake_http_api(monkeypatch, module):
     """
-    Lets a test decide how the "Tavily API" answers. Call it with a handler that
-    receives the httpx.Request and returns an httpx.Response (or raises). The
-    requests that were sent are collected in the returned list.
+    Returns an installer that lets a test decide how an external HTTP API answers.
+    Call it with a handler that receives the httpx.Request and returns an
+    httpx.Response (or raises). The requests that were sent are collected in the
+    returned list.
     """
     sent_requests: list[httpx.Request] = []
 
@@ -65,10 +70,22 @@ def fake_tavily(monkeypatch):
             return handler(request)
 
         client = httpx.Client(transport=httpx.MockTransport(recording_handler))
-        monkeypatch.setattr(web_search, "get_http_client", lambda: client)
+        monkeypatch.setattr(module, "get_http_client", lambda: client)
         return sent_requests
 
     return install
+
+
+@pytest.fixture
+def fake_tavily(monkeypatch):
+    """The Tavily Search API, as used by web_search."""
+    return fake_http_api(monkeypatch, web_search)
+
+
+@pytest.fixture
+def fake_ai_demo(monkeypatch):
+    """The Java AI-Demo app, as used by get_ai_demo_providers."""
+    return fake_http_api(monkeypatch, ai_demo)
 
 
 # --- Helpers that build objects shaped like OpenAI responses ----------

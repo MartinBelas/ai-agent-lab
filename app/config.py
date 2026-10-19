@@ -8,6 +8,7 @@ pydantic-settings reads the values in this order (first one wins):
 """
 
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -40,12 +41,31 @@ class Settings(BaseSettings):
     web_search_max_results: int = Field(default=3, ge=1, le=10)
     web_search_timeout_seconds: float = Field(default=10.0, gt=0)
 
+    # The Java AI-Demo app (see app/ai_demo.py). Optional: without it the
+    # get_ai_demo_providers tool is not offered. Example: http://localhost:8080
+    ai_demo_base_url: str | None = None
+    ai_demo_timeout_seconds: float = Field(default=5.0, gt=0)
+
     @field_validator("tavily_api_key", mode="before")
     @classmethod
     def empty_key_means_no_key(cls, value: object) -> object:
         """'TAVILY_API_KEY=' (empty) in .env means "not configured", not an empty key."""
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("ai_demo_base_url", mode="before")
+    @classmethod
+    def normalize_base_url(cls, value: object) -> object:
+        """Empty means "not configured"; otherwise an http(s) URL without a trailing slash."""
+        if not isinstance(value, str):
+            return value
+        value = value.strip().rstrip("/")
+        if not value:
+            return None
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError("AI_DEMO_BASE_URL must be an http:// or https:// URL")
         return value
 
 
