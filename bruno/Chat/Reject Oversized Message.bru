@@ -1,0 +1,27 @@
+meta {
+  name: Reject Oversized Message
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/api/chat
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "message": "replaced by the pre-request script"
+  }
+}
+
+script:pre-request {
+  req.setBody({ message: "x".repeat(4001) });
+}
+
+tests {
+  test("returns 422 for more than 4000 characters", function () {
+    expect(res.getStatus()).to.equal(422);
+  });
+}

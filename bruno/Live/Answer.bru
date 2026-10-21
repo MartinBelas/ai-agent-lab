@@ -1,0 +1,43 @@
+meta {
+  name: Answer
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/api/chat
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "message": "What is 7 times 6?"
+  }
+}
+
+script:pre-request {
+  if (bru.getEnvName() !== "LocalLive") {
+    bru.runner.skipRequest();
+  }
+}
+
+tests {
+  test("returns a reply in the contract v1 shape", function () {
+    expect(res.getStatus()).to.equal(200);
+    const body = res.getBody();
+    expect(body).to.have.all.keys("reply", "sources", "usage");
+    expect(body.reply).to.be.a("string").and.not.empty;
+    expect(body.sources).to.be.an("array");
+    expect(body.usage).to.have.all.keys(
+      "model_calls", "tool_calls", "web_searches", "input_tokens", "output_tokens"
+    );
+  });
+
+  test("reports the usage of at least one model call", function () {
+    const usage = res.getBody().usage;
+    expect(usage.model_calls).to.be.at.least(1);
+    expect(usage.input_tokens).to.be.above(0);
+    expect(usage.web_searches).to.be.at.most(usage.tool_calls);
+  });
+}

@@ -1,0 +1,23 @@
+meta {
+  name: Reject Empty Message
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/api/chat
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "message": ""
+  }
+}
+
+tests {
+  test("returns 422", function () {
+    expect(res.getStatus()).to.equal(422);
+  });
+}

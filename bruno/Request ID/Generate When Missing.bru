@@ -1,0 +1,17 @@
+meta {
+  name: Generate When Missing
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/health
+  body: none
+  auth: none
+}
+
+tests {
+  test("returns a new 8-character ID", function () {
+    expect(res.getHeader("x-request-id")).to.match(/^[0-9a-f]{8}$/);
+  });
+}

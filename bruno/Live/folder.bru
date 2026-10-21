@@ -1,0 +1,13 @@
+meta {
+  name: Live
+  seq: 4
+}
+
+docs {
+  Paid checks against the real OpenAI (and Tavily) APIs. They run only with the LocalLive
+  environment and are skipped in collection runs with any other environment, so the default
+  `bru run --env Local` is free and deterministic.
+
+  The model decides what to answer and whether to search, so these requests check only what
+  the service itself guarantees (contract fields, limits, source rules), never the wording.
+}

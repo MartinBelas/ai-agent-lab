@@ -4,7 +4,8 @@ currently offers (GET /api/llm/providers).
 
 This is the only direction in which the agent calls AI-Demo: a small, read-only
 request to a public metadata endpoint. The tool never sends user data there and
-never calls any other AI-Demo endpoint.
+never calls any other AI-Demo endpoint. Only the request ID of the current chat
+request is forwarded (X-Request-ID, see app/request_context.py).
 
 Response shape (see openapi.yaml in the ai-demo repo):
     {"providers": [{"id": "OPENAI", "model": "gpt-5.4-mini"}, ...]}
@@ -17,6 +18,7 @@ from typing import Any
 import httpx
 
 from app.config import get_settings
+from app.request_context import REQUEST_ID_HEADER, get_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,7 @@ def get_ai_demo_providers() -> str:
         return "Error: the AI-Demo connection is not configured."
 
     try:
-        response = get_http_client().get(base_url + PROVIDERS_PATH)
+        response = get_http_client().get(base_url + PROVIDERS_PATH, headers=request_id_headers())
     except httpx.TimeoutException:
         logger.warning("AI-Demo providers request timed out")
         return "Error: the AI-Demo app did not respond in time."
@@ -61,6 +63,15 @@ def get_ai_demo_providers() -> str:
         logger.warning("AI-Demo providers response is not JSON")
         return "Error: the AI-Demo app returned an unexpected response."
     return format_providers(payload)
+
+
+def request_id_headers() -> dict[str, str]:
+    """
+    Forwards the ID of the current chat request, so AI-Demo can tie this call to the
+    request that caused it. It is our own service; third parties never get the ID.
+    """
+    request_id = get_request_id()
+    return {REQUEST_ID_HEADER: request_id} if request_id else {}
 
 
 def format_providers(payload: Any) -> str:

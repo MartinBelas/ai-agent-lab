@@ -21,6 +21,8 @@ automation, to agent frameworks.
   - `get_ai_demo_providers` -- asks the Java `ai-demo` app which LLM providers
     and models it currently offers (`GET /api/llm/providers`). Enabled only when
     `AI_DEMO_BASE_URL` is set.
+- Request IDs: every request carries an `X-Request-ID` (sent by `ai-demo` or
+  generated here) that appears in every log line, see [Request ID](#request-id).
 - Configuration via environment variables or a local `.env` file.
 - A pytest suite that never calls the real OpenAI, Tavily or `ai-demo` API.
 
@@ -33,9 +35,11 @@ app/
   web_search.py  # web_search tool (Tavily Search API over httpx)
   ai_demo.py     # get_ai_demo_providers tool (read-only call to the Java ai-demo app)
   tool_result.py # ToolResult / Source -- what tools return to the agent loop
+  request_context.py # X-Request-ID: middleware, context variable, log records
   prompts.py   # System prompts
   config.py    # Settings from env variables / .env (pydantic-settings)
 tests/         # pytest tests, OpenAI and Tavily are mocked
+bruno/         # Bruno collection for the running service
 requirements.txt
 requirements-dev.txt   # adds pytest
 pytest.ini
@@ -127,6 +131,24 @@ Response:
 Errors: `422` invalid request (FastAPI validation details), `502` the AI provider
 failed (generic message, no internal details).
 
+### Request ID
+
+To trace one request through both services, the caller may send an
+`X-Request-ID` header (`ai-demo` sends a short 8-character ID and logs it too):
+
+- Accepted only if it is 1-64 characters of `A-Z a-z 0-9 . _ -`. A missing or
+  invalid value is replaced by a new 8-character ID; an invalid value is never
+  logged (log injection).
+- Every log line written while the request is handled starts with it, including
+  the `httpx` lines for the OpenAI and Tavily calls:
+  `INFO:     [a1b2c3d4] app.main - Chat request (history=2)`. Chat content is
+  never logged, only sizes and usage counters. The ID is set on every log record
+  (`%(request_id)s`, `-` outside a request), so it also works with your own
+  logging configuration, e.g. `uvicorn --log-config`.
+- Returned in the `X-Request-ID` response header, also on `422`, `502` and on
+  a `500` from an unhandled error.
+- Forwarded to `ai-demo` by `get_ai_demo_providers`; never sent to OpenAI or Tavily.
+
 ## Tests
 
 ```bash
@@ -136,6 +158,24 @@ pytest -v
 The tests replace the OpenAI client with a mock, and the Tavily API and `ai-demo`
 with an `httpx.MockTransport`, so they are free, fast and do not need real API keys.
 They run in a temporary directory, so your local `.env` is never used.
+
+### Bruno collection
+
+The `bruno` directory is a [Bruno](https://www.usebruno.com) collection that checks the
+running service over HTTP. Start the service on port 8081 and run it in Bruno, or with the
+Bruno CLI (`npm install -g @usebruno/cli`):
+
+```shell
+cd bruno
+bru run --env Local      # free and deterministic: health, validation (422), X-Request-ID
+bru run --env LocalLive  # also the paid Live checks against the real OpenAI and Tavily APIs
+```
+
+The `Live` requests are skipped with any environment other than `LocalLive`. As the model
+decides what to answer and whether to search, they check only what the service guarantees
+(contract fields, usage counters, the web search limit, source rules), never the wording.
+The end-to-end checks through the Java app live in the `ai-demo` repository
+(`bruno/Agent Integration`).
 
 ## Known limitations
 
@@ -184,5 +224,7 @@ The `Dockerfile` is Cloud Run compatible (listens on `$PORT`, default 8080):
 6. **Workflow automation with n8n** -- call this service as an HTTP step.
 7. **Agent frameworks** -- LangChain/LangGraph, OpenAI Agents SDK, compared on
    the same use case.
-8. **Integration with `ai-demo`** -- a private, authenticated call from the
-   Java service that keeps its rate limiting and quotas in place.
+8. In progress: **Integration with `ai-demo`** -- agent mode in `ai-demo` calls
+   `/api/chat` with an `X-Request-ID`, keeping its rate limiting and quotas in
+   place (works locally). Next: deploying this service as a private Cloud Run
+   service that only `ai-demo` can invoke.

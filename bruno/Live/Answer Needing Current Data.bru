@@ -1,0 +1,50 @@
+meta {
+  name: Answer Needing Current Data
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/api/chat
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "message": "What is the current EUR to CZK exchange rate?"
+  }
+}
+
+docs {
+  Usually makes the agent search the web (uses a Tavily credit when TAVILY_API_KEY is set).
+  Whether it searches is the model's decision, so the checks hold either way.
+}
+
+script:pre-request {
+  if (bru.getEnvName() !== "LocalLive") {
+    bru.runner.skipRequest();
+  }
+}
+
+tests {
+  test("returns a reply", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().reply).to.be.a("string").and.not.empty;
+  });
+
+  test("keeps the per-request web search limit", function () {
+    expect(res.getBody().usage.web_searches).to.be.within(0, 2);
+  });
+
+  test("returns sources only from a search, as http(s) links", function () {
+    const body = res.getBody();
+    if (body.usage.web_searches === 0) {
+      expect(body.sources).to.eql([]);
+    }
+    body.sources.forEach(function (source) {
+      expect(source).to.have.all.keys("title", "url");
+      expect(source.url).to.match(/^https?:\/\//);
+    });
+  });
+}

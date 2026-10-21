@@ -11,10 +11,12 @@ Test:
          -d '{"message": "What time is it now?"}'
 
 The /api/chat contract (v1) is meant for the Java AI-Demo app, which calls this
-service server-to-server; see "API contract" in README.md.
+service server-to-server; see "API contract" in README.md. Every request carries an
+X-Request-ID (sent by AI-Demo or generated here) that appears in all log lines.
 """
 
 import logging
+import time
 from collections.abc import Callable, Sequence
 from typing import Annotated, Literal
 
@@ -24,10 +26,28 @@ from openai import OpenAIError
 from pydantic import BaseModel, Field, model_validator
 
 from app.agent import AgentResult, HistoryMessage, run_agent
+from app.request_context import RequestIdMiddleware, install_request_id_log_records
 
-# Uvicorn configures only its own loggers. Without this, INFO logs from our modules
-# (app.*) and from httpx (the outgoing requests to OpenAI and Tavily) would not show up.
-logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s - %(message)s")
+# Every line carries the request ID, the same one AI-Demo logs (see app/request_context.py).
+LOG_FORMAT = "%(levelname)s:     [%(request_id)s] %(name)s - %(message)s"
+
+
+def configure_logging() -> None:
+    """
+    Every log record gets the request ID (record.request_id), however the logging
+    is configured -- a custom configuration can use %(request_id)s too.
+
+    Uvicorn configures only its own loggers. When nobody has configured the root
+    logger, add a console handler with LOG_FORMAT; without it, INFO logs from our
+    modules (app.*) and from httpx (the outgoing requests to OpenAI and Tavily)
+    would not show up. An existing root configuration (uvicorn --log-config, pytest)
+    is left alone, apart from the request ID attribute.
+    """
+    install_request_id_log_records()
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+
+
+configure_logging()
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +62,8 @@ MAX_MESSAGE_LENGTH = 4000
 MAX_HISTORY_MESSAGES = 20
 MAX_HISTORY_TOTAL_CHARS = 16000
 
-app = FastAPI(title="AI Agent Lab", version="0.2.0")
+app = FastAPI(title="AI Agent Lab", version="0.3.0")
+app.add_middleware(RequestIdMiddleware)
 
 
 class ChatHistoryMessage(BaseModel):
@@ -125,9 +146,22 @@ def handle_chat_request(
     chat_request: ChatRequest,
     agent: Annotated[AgentRunner, Depends(get_agent)],
 ) -> ChatResponse:
+    # Sizes and counters only -- chat content is never logged.
+    logger.info("Chat request (history=%d)", len(chat_request.history))
+    start = time.monotonic()
     history = [HistoryMessage(role=message.role, content=message.content) for message in chat_request.history]
     result = agent(chat_request.message, history)
     usage = result.usage
+    logger.info(
+        "Chat reply in %d ms (model_calls=%d, tool_calls=%d, web_searches=%d, tokens=%d/%d, sources=%d)",
+        round((time.monotonic() - start) * 1000),
+        usage.model_calls,
+        usage.tool_calls,
+        usage.web_searches,
+        usage.input_tokens,
+        usage.output_tokens,
+        len(result.sources),
+    )
     return ChatResponse(
         reply=result.reply,
         sources=[ChatSource(title=source.title, url=source.url) for source in result.sources],

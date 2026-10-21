@@ -1,0 +1,23 @@
+meta {
+  name: Replace Invalid ID
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/api/health
+  body: none
+  auth: none
+}
+
+headers {
+  X-Request-ID: not valid;<script>
+}
+
+tests {
+  test("replaces an ID with forbidden characters by a new one", function () {
+    const requestId = res.getHeader("x-request-id");
+    expect(requestId).to.not.equal("not valid;<script>");
+    expect(requestId).to.match(/^[0-9a-f]{8}$/);
+  });
+}
