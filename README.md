@@ -202,14 +202,18 @@ The end-to-end checks through the Java app live in the `ai-demo` repository
 
 ## Deploying to Cloud Run (optional)
 
-The `Dockerfile` is Cloud Run compatible (listens on `$PORT`, default 8080):
+The `Dockerfile` is Cloud Run compatible (listens on `$PORT`, default 8080). The
+infrastructure is Terraform code in `deploy/terraform` -- a private Cloud Run
+service that only the `ai-demo` service account may invoke, Artifact Registry,
+Secret Manager secrets and a remote state in GCS -- and one command deploys it
+(Windows PowerShell):
 
-1. Build and push the image (e.g. `docker build` and push to Artifact Registry
-   or GHCR, or a GitHub Actions workflow).
-2. Provide `OPENAI_API_KEY` (and `TAVILY_API_KEY`) from Secret Manager as
-   environment variables, and set `AI_DEMO_BASE_URL` to the deployed `ai-demo` URL.
-3. Deploy it as a separate Cloud Run service (e.g. `ai-agent-lab`), ideally
-   not publicly accessible.
+```powershell
+.\deploy\deploy.ps1
+```
+
+The one-off manual steps (state bucket, `gcloud` logins) and the configuration
+are described in [deploy/README.md](deploy/README.md).
 
 ## Roadmap
 

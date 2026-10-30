@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars (ignored by git). Everything here is optional.
+
+# URL of ai-demo once it runs; enables the get_ai_demo_providers tool.
+# ai_demo_base_url = "https://ai-demo-xxxxxxxxxx-ew.a.run.app"
+
+# Set to true after the first Tavily key version was added; enables web_search.
+# tavily_enabled = true
+
+# Overrides of the defaults in app/config.py.
+# extra_env = {
+#   OPENAI_MODEL          = "gpt-5.4-mini"
+#   AGENT_MAX_STEPS       = "5"
+#   AGENT_MAX_TOOL_CALLS  = "8"
+#   AGENT_TIMEOUT_SECONDS = "60"
+#   WEB_SEARCH_MAX_CALLS  = "2"
+# }

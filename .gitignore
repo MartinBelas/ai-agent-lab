@@ -8,6 +8,15 @@ venv/
 # Secrets -- never commit
 .env
 
+# Terraform -- providers, local state and local variable values (.terraform.lock.hcl IS committed)
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+
+# Local archives of the working directory (can contain .terraform/)
+*.zip
+
 # IDE / OS
 .idea/
 .DS_Store

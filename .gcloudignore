@@ -1,0 +1,10 @@
+# What `gcloud builds submit` uploads as the Cloud Build context (see deploy/deploy.ps1).
+# The Dockerfile needs only requirements.txt and app/.
+#!include:.gitignore
+.git
+.gitignore
+.gcloudignore
+deploy/
+docs/
+tests/
+bruno/
