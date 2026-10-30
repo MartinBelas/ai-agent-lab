@@ -228,7 +228,7 @@ are described in [deploy/README.md](deploy/README.md).
 6. **Workflow automation with n8n** -- call this service as an HTTP step.
 7. **Agent frameworks** -- LangChain/LangGraph, OpenAI Agents SDK, compared on
    the same use case.
-8. In progress: **Integration with `ai-demo`** -- agent mode in `ai-demo` calls
+8. Done: **Integration with `ai-demo`** -- agent mode in `ai-demo` calls
    `/api/chat` with an `X-Request-ID`, keeping its rate limiting and quotas in
-   place (works locally). Next: deploying this service as a private Cloud Run
-   service that only `ai-demo` can invoke.
+   place. This service runs as a private Cloud Run service (see `deploy/`) that
+   only the `ai-demo` service account can invoke.
