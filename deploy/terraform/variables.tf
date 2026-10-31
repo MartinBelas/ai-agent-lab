@@ -54,7 +54,7 @@ variable "ai_demo_service_account_email" {
   description = <<-EOT
     Service account of the ai-demo Cloud Run service; the only caller allowed to
     invoke this service. Empty means ai-demo@PROJECT_ID.iam.gserviceaccount.com,
-    the account that ai-demo's deploy script creates; it must exist before apply.
+    the account that ai-demo's Terraform stack creates; it must exist before apply.
   EOT
   type        = string
   default     = ""

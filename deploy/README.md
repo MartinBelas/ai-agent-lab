@@ -117,7 +117,7 @@ Optional settings go to `deploy/terraform/terraform.tfvars` (git-ignored, start 
 | --- | --- |
 | `ai_demo_base_url` | URL of `ai-demo`; enables the `get_ai_demo_providers` tool. Empty by default. |
 | `tavily_enabled` | `true` after the Tavily secret got a version; enables `web_search`. |
-| `ai_demo_service_account_email` | Caller allowed to invoke the service. Default: `ai-demo@<project>.iam.gserviceaccount.com`, created by `ai-demo`'s `deploy-cloud-run.ps1`, so deploy `ai-demo` first. |
+| `ai_demo_service_account_email` | Caller allowed to invoke the service. Default: `ai-demo@<project>.iam.gserviceaccount.com`, created by `ai-demo`'s Terraform stack (`deploy/deploy.ps1` there), so deploy `ai-demo` first. |
 | `extra_env` | Map of optional variables: `OPENAI_MODEL`, `AGENT_MAX_STEPS`, `AGENT_MAX_TOOL_CALLS`, `AGENT_TIMEOUT_SECONDS`, `WEB_SEARCH_*`, ... (defaults in `app/config.py`). |
 | `images_to_keep` | Newest images kept in Artifact Registry (10); older ones are deleted after 30 days. |
 | `max_instances`, `request_timeout_seconds` | Cost cap (2) and request timeout (120 s, above the 60 s agent budget). |
@@ -137,7 +137,8 @@ without any token.
 
 ## Connecting `ai-demo`
 
-Take `service_url` from the outputs (`terraform output service_url` in `deploy/terraform`) and set
-it as `AGENT_LAB_BASE_URL` in `ai-demo`, with `AGENT_LAB_ENABLED=true` and
-`AGENT_LAB_AUTHENTICATION=GOOGLE_ID_TOKEN`. Once `ai-demo` runs, put its URL into
-`ai_demo_base_url` here and deploy again.
+Nothing to copy: `ai-demo`'s Terraform stack (`agent_lab_enabled`, on by default) looks this
+service up by name and sets `AGENT_LAB_BASE_URL`, `AGENT_LAB_ENABLED` and
+`AGENT_LAB_AUTHENTICATION=GOOGLE_ID_TOKEN` itself, so deploy this service first, then `ai-demo`.
+This stack grants the `ai-demo` service account `roles/run.invoker` (above). In the other direction,
+put the `service_url` output of `ai-demo`'s stack into `ai_demo_base_url` here and deploy again.
